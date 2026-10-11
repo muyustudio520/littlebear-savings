@@ -194,6 +194,20 @@
         </div>
     </div>
 
+    <!-- 交易紀錄編輯視窗 -->
+    <div id="transactionModal" class="fixed inset-0 bg-black/40 z-[60] hidden items-center justify-center p-4">
+      <div class="bg-[#fffaf0] rounded-3xl p-6 w-full max-w-sm border border-[#e2d5c3] card-shadow">
+        <h3 id="transactionModalTitle" class="font-black text-lg mb-4">交易紀錄</h3>
+        <form id="transactionForm" onsubmit="submitTransaction(event)" class="space-y-3">
+          <label class="block text-xs font-bold">金額（元）<input id="txAmount" type="number" min="1" step="1" required class="mt-1 w-full border rounded-xl p-3 bg-white"></label>
+          <label class="block text-xs font-bold">日期<input id="txDate" type="date" required class="mt-1 w-full border rounded-xl p-3 bg-white"></label>
+          <label class="block text-xs font-bold">用途／備註<input id="txNote" type="text" maxlength="160" placeholder="例如：臨時支出、每月存款" class="mt-1 w-full border rounded-xl p-3 bg-white"></label>
+          <p id="txError" class="text-xs text-red-600 hidden"></p>
+          <div class="flex gap-2 pt-2"><button type="button" onclick="closeTransactionModal()" class="flex-1 p-3 rounded-xl border">取消</button><button type="submit" class="flex-1 p-3 rounded-xl bg-[#8c6d53] text-white font-bold">確定</button></div>
+        </form>
+      </div>
+    </div>
+
     <!-- Toast Notification -->
     <div id="toast" class="fixed bottom-6 right-6 z-50 transform translate-y-20 opacity-0 transition-all duration-300 pointer-events-none">
         <div class="bg-[#614f39] text-[#fffaf0] px-4 py-2.5 rounded-2xl shadow-lg border border-[#e2d5c3] flex items-center gap-2.5">
@@ -228,26 +242,99 @@
 // 永久累計總金額
 let lifetimeBase = Number(localStorage.getItem('little_bear_lifetime_base')) || 0;
 
-function getCurrentSavingsTotal() {
-    let total = 0;
-    fundsData.forEach((fund) => {
-        if (fund.isSummary || fund.isWishlist) return;
-        const st = savedState[fund.id] || {};
-        if (fund.isVariableStash) {
-            (st.records || []).forEach(r => total += Number(r.amount) || 0);
-        } else {
-            for (let i = 1; i <= fund.months; i++) {
-                if (typeof st[i] === 'number') total += st[i];
-            }
-        }
-    });
-    return total;
-}
+function getCurrentSavingsTotal() { return fundsData.filter(f=>!f.isSummary&&!f.isWishlist).reduce((sum,f)=>sum+getFundBalance(f),0); }
 
 function getLifetimeTotal() {
     return lifetimeBase + getCurrentSavingsTotal();
 }
 
+
+        // 存入及提領交易紀錄；沿用原本月存資料，避免更新後清空舊存款。
+        let transactions = JSON.parse(localStorage.getItem('little_bear_transactions_v1') || 'null');
+        function localDate() { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
+        function makeId() { return 'tx_' + Date.now() + '_' + Math.random().toString(36).slice(2,9); }
+        function initializeTransactions() {
+            if (Array.isArray(transactions)) return;
+            transactions = [];
+            fundsData.filter(f => !f.isSummary && !f.isWishlist).forEach(f => {
+                const st = savedState[f.id] || {};
+                if (f.isVariableStash) {
+                    (st.records || []).forEach(r => transactions.push({id:makeId(),fundId:f.id,type:'deposit',source:'stash',sourceId:r.id,amount:Number(r.amount)||0,date:normalizeTxDate(r.date),note:r.note||'原有存錢筒紀錄'}));
+                } else {
+                    for (let m=1;m<=f.months;m++) if (Number(st[m])>0) transactions.push({id:makeId(),fundId:f.id,type:'deposit',source:'month',month:m,amount:Number(st[m]),date:localDate(),note:`原有第 ${m} 個月存款（匯入舊資料）`});
+                }
+            });
+            persistTransactions();
+        }
+        function normalizeTxDate(value) {
+            if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+            const d = value ? new Date(value) : new Date();
+            return Number.isNaN(d.getTime()) ? localDate() : `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+        }
+        function persistTransactions() { localStorage.setItem('little_bear_transactions_v1',JSON.stringify(transactions)); }
+        function fundAdjustment(fundId) { return transactions.filter(t=>t.fundId===fundId && (t.type==='withdraw' || t.source==='extra')).reduce((a,t)=>a+(t.type==='withdraw'?-t.amount:t.amount),0); }
+        function getFundBalance(fund) {
+            const st=savedState[fund.id]||{};
+            let base=0;
+            if(fund.isVariableStash) (st.records||[]).forEach(r=>base+=Number(r.amount)||0);
+            else for(let i=1;i<=fund.months;i++) base+=Number(st[i])||0;
+            return base+fundAdjustment(fund.id);
+        }
+        function saveTransactionChanges() { persistTransactions(); saveAppData(); renderApp(); }
+        let transactionDraft=null;
+        function openTransactionModal(fundId,type,id=null) {
+            const fund=fundsData.find(f=>f.id===fundId);
+            if(!fund || fund.isSummary || fund.isWishlist) return;
+            const old=id ? transactions.find(t=>t.id===id) : null;
+            if(id && !old) return;
+            transactionDraft={fundId,type:old?.type||type,id};
+            document.getElementById('transactionModalTitle').textContent=(old?'編輯':'新增')+(transactionDraft.type==='withdraw'?'提領':'存入')+'｜'+fund.bank;
+            document.getElementById('txAmount').value=old?.amount||'';
+            document.getElementById('txDate').value=old?.date||localDate();
+            document.getElementById('txNote').value=old?.note||'';
+            document.getElementById('txError').classList.add('hidden');
+            document.getElementById('transactionModal').classList.remove('hidden');
+            document.getElementById('transactionModal').classList.add('flex');
+        }
+        function closeTransactionModal() { document.getElementById('transactionModal').classList.add('hidden');document.getElementById('transactionModal').classList.remove('flex');transactionDraft=null; }
+        function submitTransaction(event) {
+            event.preventDefault();
+            if(!transactionDraft) return;
+            const amount=Number(document.getElementById('txAmount').value);
+            const date=document.getElementById('txDate').value;
+            const note=document.getElementById('txNote').value.trim();
+            const error=document.getElementById('txError');
+            if(!Number.isSafeInteger(amount)||amount<=0||!/^\d{4}-\d{2}-\d{2}$/.test(date)) { error.textContent='請輸入正確的日期及正整數金額';error.classList.remove('hidden');return; }
+            const {fundId,type,id}=transactionDraft;
+            const old=id?transactions.find(t=>t.id===id):null;
+            const balance=getFundBalance(fundsData.find(f=>f.id===fundId));
+            const oldEffect=old?(old.type==='withdraw'?-old.amount:old.amount):0;
+            const newEffect=type==='withdraw'?-amount:amount;
+            if(balance-oldEffect+newEffect<0) {error.textContent='提領金額不能超過目前可用餘額';error.classList.remove('hidden');return;}
+            if(old) {
+                if(old.source==='month') { const st=savedState[fundId]||{};st[old.month]=amount;savedState[fundId]=st; }
+                if(old.source==='stash') {const r=(savedState[fundId]?.records||[]).find(r=>r.id===old.sourceId);if(r){r.amount=amount;r.date=date;r.note=note;}}
+                Object.assign(old,{amount,date,note});
+            } else transactions.push({id:makeId(),fundId,type,source:type==='withdraw'?'withdraw':'extra',amount,date,note});
+            closeTransactionModal();saveTransactionChanges();showToast('交易紀錄已儲存！');
+        }
+        async function deleteTransaction(id) {
+            const t=transactions.find(t=>t.id===id);if(!t)return;
+            if(!await showCustomModal('刪除交易','確定要刪除這筆交易紀錄嗎？','none'))return;
+            if(t.source==='month') {const st=savedState[t.fundId]||{};delete st[t.month];savedState[t.fundId]=st;}
+            if(t.source==='stash') {const st=savedState[t.fundId]||{};st.records=(st.records||[]).filter(r=>r.id!==t.sourceId);savedState[t.fundId]=st;}
+            transactions=transactions.filter(x=>x.id!==id);saveTransactionChanges();showToast('交易紀錄已刪除');
+        }
+        function escapeTx(text) {return String(text??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+        function transactionPanel(fundId) {
+            const f=fundsData.find(x=>x.id===fundId);
+            const rows=transactions.filter(t=>t.fundId===fundId).sort((a,b)=>b.date.localeCompare(a.date)||String(b.id).localeCompare(String(a.id)));
+            return `<section class="mt-5 bg-[#fffaf0] border border-[#e2d5c3] rounded-3xl p-5 card-shadow">
+              <div class="flex flex-wrap items-center justify-between gap-3 mb-4"><div><h3 class="font-black text-lg">📋 存入／提領紀錄</h3><p class="text-xs text-[#947c5d]">目前餘額：$${getFundBalance(f).toLocaleString()}</p></div>
+              <div class="flex gap-2"><button onclick="openTransactionModal('${fundId}','deposit')" class="bg-[#8c6d53] text-white rounded-xl px-3 py-2 text-xs font-bold">💰 存入</button><button onclick="openTransactionModal('${fundId}','withdraw')" class="border border-[#8c6d53] text-[#614f39] rounded-xl px-3 py-2 text-xs font-bold">💸 提領</button></div></div>
+              <div class="space-y-2 max-h-96 overflow-y-auto">${rows.length?rows.map(t=>`<div class="bg-white border border-[#e2d5c3] rounded-xl p-3 flex items-center justify-between gap-2"><div class="min-w-0"><p class="text-xs text-[#947c5d]">${escapeTx(t.date)} · ${t.type==='withdraw'?'💸 提領':'💰 存入'}</p><p class="font-black ${t.type==='withdraw'?'text-red-600':'text-[#614f39]'}">${t.type==='withdraw'?'-':'+'}$${t.amount.toLocaleString()}</p><p class="text-xs break-words">${escapeTx(t.note||'無備註')}</p></div><div class="flex gap-2 shrink-0"><button onclick="openTransactionModal('${fundId}','${t.type}','${t.id}')" class="text-xs underline">編輯</button><button onclick="deleteTransaction('${t.id}')" class="text-xs text-red-600 underline">刪除</button></div></div>`).join(''):'<p class="text-xs text-[#947c5d] py-5 text-center">尚無交易紀錄</p>'}</div>
+            </section>`;
+        }
 
         // --- 備份與還原功能 ---
         function exportDataToJson() {
@@ -256,6 +343,7 @@ function getLifetimeTotal() {
                 savingsState: savedState,
                 wishlist: wishlistData,
                 lifetimeBase: lifetimeBase,
+                transactions: transactions,
                 exportDate: new Date().toISOString()
             };
 
@@ -289,6 +377,8 @@ function getLifetimeTotal() {
                         // 覆蓋本地變數
                         savedState = importedData.savingsState;
                         wishlistData = importedData.wishlist;
+                        transactions = Array.isArray(importedData.transactions) ? importedData.transactions : null;
+                        initializeTransactions(); persistTransactions();
                         if (importedData.lifetimeBase !== undefined) {
                             lifetimeBase = Number(importedData.lifetimeBase) || 0;
                             localStorage.setItem('little_bear_lifetime_base', String(lifetimeBase));
@@ -391,6 +481,7 @@ function getLifetimeTotal() {
                 savingsState: savedState,
                 wishlist: wishlistData,
                 lifetimeBase: lifetimeBase,
+                transactions: transactions,
                 exportDate: new Date().toISOString(),
                 app: 'Little Bear Savings'
             };
@@ -448,6 +539,8 @@ function getLifetimeTotal() {
                 }
                 savedState = importedData.savingsState;
                 wishlistData = importedData.wishlist;
+                        transactions = Array.isArray(importedData.transactions) ? importedData.transactions : null;
+                        initializeTransactions(); persistTransactions();
                 if (importedData.lifetimeBase !== undefined) {
                     lifetimeBase = Number(importedData.lifetimeBase) || 0;
                     localStorage.setItem('little_bear_lifetime_base', String(lifetimeBase));
@@ -609,6 +702,7 @@ function getLifetimeTotal() {
                     currentAmount += fundState[i];
                 }
             }
+            currentAmount += fundAdjustment(fund.id);
             const target = fund.target;
             const percentage = Math.min(100, Math.round((currentAmount / target) * 100));
             const remaining = Math.max(0, target - currentAmount);
@@ -623,6 +717,7 @@ function getLifetimeTotal() {
                 const confirmed = await showCustomModal('取消存款確認', `第 ${monthIndex} 個月目前已存入 $${currentVal.toLocaleString()}。請問是否要取消此筆存款紀錄？`, 'none');
                 if (confirmed) {
                     delete fundState[monthIndex];
+                    transactions=transactions.filter(t=>!(t.fundId===fundId && t.source==='month' && t.month===monthIndex));persistTransactions();
                     savedState[fundId] = fundState;
                     saveAppData();
                     renderApp();
@@ -630,6 +725,7 @@ function getLifetimeTotal() {
                 }
             } else {
                 fundState[monthIndex] = defaultMonthly;
+                transactions.push({id:makeId(),fundId,type:'deposit',source:'month',month:monthIndex,amount:defaultMonthly,date:localDate(),note:`第 ${monthIndex} 個月預定存款`});persistTransactions();
                 savedState[fundId] = fundState;
                 saveAppData();
                 playDepositSound();
@@ -646,6 +742,8 @@ function getLifetimeTotal() {
             const val = await showCustomModal('手動輸入存入金額', `請輸入第 ${monthIndex} 個月實際存入 ${fund.bank} 的金額 ($)：`, 'single', currentVal);
             if (val !== false && !isNaN(val) && val > 0) {
                 fundState[monthIndex] = val;
+                const existingTx=transactions.find(t=>t.fundId===fundId && t.source==='month' && t.month===monthIndex);
+                if(existingTx) existingTx.amount=val; else transactions.push({id:makeId(),fundId,type:'deposit',source:'month',month:monthIndex,amount:val,date:localDate(),note:`第 ${monthIndex} 個月手動存款`});persistTransactions();
                 savedState[fundId] = fundState;
                 saveAppData();
                 playDepositSound();
@@ -675,6 +773,8 @@ const fundId = 'fund8';
             });
 
             savedState[fundId] = fundState;
+            const latest=fundState.records[fundState.records.length-1];
+            transactions.push({id:makeId(),fundId,type:'deposit',source:'stash',sourceId:latest.id,amount,date:normalizeTxDate(latest.date),note:latest.note});persistTransactions();
             saveAppData();
             playDepositSound();
             renderApp();
@@ -687,6 +787,7 @@ const fundId = 'fund8';
                 const fundId = 'fund8';
                 const fundState = savedState[fundId] || { records: [] };
                 fundState.records = fundState.records.filter(r => r.id !== recordId);
+                transactions=transactions.filter(t=>!(t.fundId===fundId && t.source==='stash' && t.sourceId===recordId));persistTransactions();
                 savedState[fundId] = fundState;
                 saveAppData();
                 renderApp();
@@ -866,14 +967,15 @@ const fundId = 'fund8';
                         </div>
                     </div>
                 `;
-                container.innerHTML = html;
+                container.innerHTML = html + transactionPanel(fund.id);
 
             } 
             else if (fund.isVariableStash) {
                 const fundState = savedState[fund.id] || { records: [] };
                 const records = fundState.records || [];
                 let totalSaved = 0;
-                records.forEach(r => totalSaved += r.amount);
+                records.forEach(r => totalSaved += Number(r.amount)||0);
+                totalSaved += fundAdjustment(fund.id);
 
                 let html = `
                     <div class="bg-[#fffaf0] border border-[#e2d5c3] rounded-3xl p-5 sm:p-8 card-shadow relative overflow-hidden">
@@ -939,7 +1041,7 @@ const fundId = 'fund8';
                         </div>
                     </div>
                 `;
-                container.innerHTML = html;
+                container.innerHTML = html + transactionPanel(fund.id);
 
             } 
             else if (fund.isSummary) {
@@ -958,6 +1060,7 @@ const fundId = 'fund8';
                             if (st[i] && typeof st[i] === 'number') currentAmt += st[i];
                         }
                     }
+                    currentAmt += fundAdjustment(f.id);
                     totalSaved += currentAmt;
                     const pct = f.target > 0 ? Math.min(100, Math.round((currentAmt / f.target) * 100)) : 100;
 
@@ -1005,7 +1108,7 @@ const fundId = 'fund8';
 
                             <div class="bg-[#f7f4ee] border border-[#e2d5c3] rounded-2xl p-5 mb-6 flex flex-col md:flex-row items-center justify-between gap-5">
                                 <div class="w-full md:w-1/2">
-                                    <p class="text-[10px] text-[#947c5d] mb-1">所有存錢目標總累積</p>
+                                    <p class="text-[10px] text-[#947c5d] mb-1">所有存錢目標目前累積餘額</p>
                                     <p class="text-3xl sm:text-4xl font-black text-[#614f39] mb-2.5">$${totalSaved.toLocaleString()}</p>
                                     <div class="flex justify-between text-xs text-[#796348] mb-1">
                                         <span>總體達成進度</span>
@@ -1094,6 +1197,7 @@ const fundId = 'fund8';
         }
 
         window.onload = function() {
+            initializeTransactions();
             renderTabs();
             renderApp();
             updateHeaderTotals();
