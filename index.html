@@ -280,6 +280,21 @@ function getLifetimeTotal() {
             else for(let i=1;i<=fund.months;i++) base+=Number(st[i])||0;
             return base+fundAdjustment(fund.id);
         }
+        // 將提領分配到最近一個仍有餘額的月份；僅計算顯示值，不重複扣除基金總額。
+        function getMonthlyNetAmounts(fund) {
+            const st = savedState[fund.id] || {};
+            const amounts = {};
+            for (let m = 1; m <= fund.months; m++) amounts[m] = Math.max(0, Number(st[m]) || 0);
+            // 先從最近已存款月份扣除，扣完再往前一個月份扣。
+            let withdrawn = transactions.filter(t => t.fundId === fund.id && t.type === 'withdraw')
+                .reduce((sum,t) => sum + (Number(t.amount) || 0), 0);
+            for (let m = fund.months; m >= 1 && withdrawn > 0; m--) {
+                const deducted = Math.min(amounts[m], withdrawn);
+                amounts[m] -= deducted;
+                withdrawn -= deducted;
+            }
+            return amounts;
+        }
         function saveTransactionChanges() { persistTransactions(); saveAppData(); renderApp(); }
         let transactionDraft=null;
         function openTransactionModal(fundId,type,id=null) {
@@ -930,9 +945,10 @@ const fundId = 'fund8';
                             <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3.5">
                 `;
 
+                const monthlyNetAmounts = getMonthlyNetAmounts(fund);
                 for (let i = 1; i <= fund.months; i++) {
                     const monthData = fundState[i];
-                    const savedAmount = (monthData && typeof monthData === 'number') ? monthData : 0;
+                    const savedAmount = monthlyNetAmounts[i];
                     const hasSaved = savedAmount > 0;
                     const cardBgClass = hasSaved ? 'bg-[#f0e6d6] border-[#b09978] shadow-xs' : 'bg-white border-[#e2d5c3] hover:border-[#b09978]';
 
@@ -944,7 +960,7 @@ const fundId = 'fund8';
                                     <span class="text-[10px] text-[#947c5d]">預定 $${fund.monthly.toLocaleString()}</span>
                                 </div>
                                 <div class="my-1.5">
-                                    <p class="text-[10px] text-[#947c5d]">實際存入金額</p>
+                                    <p class="text-[10px] text-[#947c5d]">目前剩餘金額</p>
                                     <p class="text-base font-extrabold ${hasSaved ? 'text-[#614f39]' : 'text-[#cbb79d]'}">
                                         ${hasSaved ? '$' + savedAmount.toLocaleString() : '$0'}
                                     </p>
