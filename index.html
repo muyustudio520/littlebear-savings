@@ -213,6 +213,28 @@
       </div>
     </div>
 
+
+    <!-- 銀行間轉帳：僅記帳，不會真的操作銀行帳戶 -->
+    <div id="transferModal" class="fixed inset-0 bg-black/40 z-[65] hidden items-center justify-center p-4">
+      <div class="bg-[#fffaf0] rounded-3xl p-6 w-full max-w-sm border border-[#e2d5c3] card-shadow">
+        <h3 class="font-black text-lg mb-3">🔁 銀行間轉帳</h3>
+        <p class="text-xs text-[#947c5d] mb-3">這裡只記錄轉帳，不會真的從銀行匯款。</p>
+        <form onsubmit="submitTransfer(event)" class="space-y-3">
+          <label class="block text-xs font-bold">轉出銀行
+            <select id="transferFrom" onchange="updateTransferBalance()" required class="mt-1 w-full border rounded-xl p-3 bg-white"></select>
+          </label>
+          <p class="text-xs text-[#947c5d]">目前轉出帳戶餘額：<strong id="transferAvailable" class="text-[#614f39]">$0</strong></p>
+          <label class="block text-xs font-bold">轉入銀行
+            <select id="transferTo" required class="mt-1 w-full border rounded-xl p-3 bg-white"></select>
+          </label>
+          <label class="block text-xs font-bold">轉帳金額（元）<input id="transferAmount" type="number" min="1" step="1" required class="mt-1 w-full border rounded-xl p-3 bg-white"></label>
+          <label class="block text-xs font-bold">日期<input id="transferDate" type="date" required class="mt-1 w-full border rounded-xl p-3 bg-white"></label>
+          <label class="block text-xs font-bold">備註<input id="transferNote" type="text" maxlength="160" placeholder="例如：調整基金分配" class="mt-1 w-full border rounded-xl p-3 bg-white"></label>
+          <p id="transferError" class="text-xs text-red-600 hidden"></p>
+          <div class="flex gap-2 pt-2"><button type="button" onclick="closeTransferModal()" class="flex-1 p-3 rounded-xl border">取消</button><button type="submit" class="flex-1 p-3 rounded-xl bg-[#8c6d53] text-white font-bold">確認轉帳紀錄</button></div>
+        </form>
+      </div>
+    </div>
     <!-- Toast Notification -->
     <div id="toast" class="fixed bottom-6 right-6 z-50 transform translate-y-20 opacity-0 transition-all duration-300 pointer-events-none">
         <div class="bg-[#614f39] text-[#fffaf0] px-4 py-2.5 rounded-2xl shadow-lg border border-[#e2d5c3] flex items-center gap-2.5">
@@ -225,14 +247,14 @@
     <script>
         const fundsData = [
             { id: 'fund1', name: '長期存款', bank: '玉山', monthly: 7000, target: 84000, months: 12, icon: 'fa-landmark' },
-            { id: 'fund2', name: '緊急備用金', bank: '台新', monthly: 2500, target: 30000, months: 12, icon: 'fa-shield-halved' },
+            { id: 'fund2', name: '緊急備用金', bank: '台新', monthly: 2700, target: 32400, months: 12, icon: 'fa-shield-halved' },
             { id: 'fund3', name: '獨立基金', bank: '中信', monthly: 2000, target: 24000, months: 12, icon: 'fa-seedling' },
             { id: 'fund4', name: '旅遊基金', bank: '郵局', monthly: 2000, target: 24000, months: 12, icon: 'fa-plane-departure' },
-            { id: 'fund5', name: '美業基金', bank: '富邦', monthly: 1500, target: 18000, months: 12, icon: 'fa-wand-magic-sparkles' },
+            { id: 'fund5', name: '美業基金', bank: '富邦', monthly: 1300, target: 15600, months: 12, icon: 'fa-wand-magic-sparkles' },
             { id: 'fund6', name: '快樂基金', bank: '國泰', monthly: 1000, target: 12000, months: 12, icon: 'fa-face-smile-beam' },
             { id: 'fund7', name: '醫美基金', bank: '信封袋', monthly: 1000, target: 12000, months: 12, icon: 'fa-heart' },
             { id: 'fund8', name: '零錢小金庫', bank: '存錢筒', monthly: 0, target: 0, isVariableStash: true, icon: 'fa-piggy-bank' },
-            { id: 'fund9', name: '所有存錢目標總金額', bank: '總金額', monthly: 0, target: 196000, isSummary: true, icon: 'fa-chart-pie' },
+            { id: 'fund9', name: '所有存錢目標總金額', bank: '總金額', monthly: 0, target: 204000, isSummary: true, icon: 'fa-chart-pie' },
             { id: 'fund10', name: '願望清單與AI鼓勵', bank: '願望清單', monthly: 0, target: 0, isWishlist: true, icon: 'fa-star' }
         ];
 
@@ -277,7 +299,7 @@ function getLifetimeTotal() {
             return Number.isNaN(d.getTime()) ? localDate() : `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
         }
         function persistTransactions() { localStorage.setItem('little_bear_transactions_v1',JSON.stringify(transactions)); }
-        function fundAdjustment(fundId) { return transactions.filter(t=>t.fundId===fundId && (t.type==='withdraw' || t.source==='extra')).reduce((a,t)=>a+(t.type==='withdraw'?-t.amount:t.amount),0); }
+        function fundAdjustment(fundId) { return transactions.filter(t=>t.fundId===fundId && (t.type==='withdraw' || t.type==='transfer_out' || t.type==='transfer_in' || t.source==='extra')).reduce((a,t)=>a+((t.type==='withdraw'||t.type==='transfer_out')?-t.amount:t.amount),0); }
         function getFundBalance(fund) {
             const st=savedState[fund.id]||{};
             let base=0;
@@ -291,7 +313,7 @@ function getLifetimeTotal() {
             const amounts = {};
             for (let m = 1; m <= fund.months; m++) amounts[m] = Math.max(0, Number(st[m]) || 0);
             // 先從最近已存款月份扣除，扣完再往前一個月份扣。
-            let withdrawn = transactions.filter(t => t.fundId === fund.id && t.type === 'withdraw')
+            let withdrawn = transactions.filter(t => t.fundId === fund.id && (t.type === 'withdraw' || t.type === 'transfer_out'))
                 .reduce((sum,t) => sum + (Number(t.amount) || 0), 0);
             for (let m = fund.months; m >= 1 && withdrawn > 0; m--) {
                 const deducted = Math.min(amounts[m], withdrawn);
@@ -347,14 +369,81 @@ function getLifetimeTotal() {
             if(t.source==='stash') {const st=savedState[t.fundId]||{};st.records=(st.records||[]).filter(r=>r.id!==t.sourceId);savedState[t.fundId]=st;}
             transactions=transactions.filter(x=>x.id!==id);saveTransactionChanges();showToast('交易紀錄已刪除');
         }
+
+        function transferFunds() { return fundsData.filter(f=>!f.isSummary&&!f.isWishlist&&!f.isVariableStash); }
+        function openTransferModal(fromId) {
+            const funds=transferFunds();
+            const options=funds.map(f=>`<option value="${f.id}">${f.bank}｜${f.name}</option>`).join('');
+            document.getElementById('transferFrom').innerHTML=options;
+            document.getElementById('transferTo').innerHTML=options;
+            document.getElementById('transferFrom').value=fromId;
+            const to=funds.find(f=>f.id!==fromId);
+            document.getElementById('transferTo').value=to?.id||fromId;
+            document.getElementById('transferAmount').value='';
+            document.getElementById('transferDate').value=localDate();
+            document.getElementById('transferNote').value='';
+            document.getElementById('transferError').classList.add('hidden');
+            updateTransferBalance();
+            document.getElementById('transferModal').classList.remove('hidden');
+            document.getElementById('transferModal').classList.add('flex');
+        }
+        function updateTransferBalance() {
+            const fund=transferFunds().find(f=>f.id===document.getElementById('transferFrom').value);
+            document.getElementById('transferAvailable').textContent='$'+(fund?getFundBalance(fund):0).toLocaleString('zh-TW');
+        }
+        function closeTransferModal() {
+            document.getElementById('transferModal').classList.add('hidden');
+            document.getElementById('transferModal').classList.remove('flex');
+        }
+        function submitTransfer(event) {
+            event.preventDefault();
+            const from=document.getElementById('transferFrom').value;
+            const to=document.getElementById('transferTo').value;
+            const amount=Number(document.getElementById('transferAmount').value);
+            const date=document.getElementById('transferDate').value;
+            const note=document.getElementById('transferNote').value.trim();
+            const err=document.getElementById('transferError');
+            const source=transferFunds().find(f=>f.id===from);
+            const destination=transferFunds().find(f=>f.id===to);
+            let msg='';
+            if(!source||!destination||from===to) msg='轉出與轉入銀行不能相同';
+            else if(!Number.isSafeInteger(amount)||amount<=0) msg='請輸入正確的正整數金額';
+            else if(!/^\d{4}-\d{2}-\d{2}$/.test(date)) msg='請選擇正確日期';
+            else if(amount>getFundBalance(source)) msg='轉帳金額不能超過轉出銀行目前餘額';
+            if(msg) {err.textContent=msg;err.classList.remove('hidden');return;}
+            const transferId=makeId();
+            transactions.push({id:makeId(),transferId,fundId:from,otherFundId:to,type:'transfer_out',source:'transfer',amount,date,note});
+            transactions.push({id:makeId(),transferId,fundId:to,otherFundId:from,type:'transfer_in',source:'transfer',amount,date,note});
+            closeTransferModal();
+            saveTransactionChanges();
+            showToast('🔁 已記錄轉帳，兩邊餘額已同步更新！');
+        }
+        async function deleteTransfer(transferId) {
+            const records=transactions.filter(t=>t.transferId===transferId);
+            if(records.length!==2)return;
+            if(!await showCustomModal('刪除轉帳','確定要同時刪除轉出及轉入的兩筆紀錄嗎？','none'))return;
+            // 反向刪除轉帳不得讓任何帳戶變成負數。
+            const inbound=records.find(t=>t.type==='transfer_in');
+            const dest=transferFunds().find(f=>f.id===inbound?.fundId);
+            if(!dest||getFundBalance(dest)<inbound.amount){showToast('轉入銀行的餘額不足，無法刪除這筆轉帳');return;}
+            transactions=transactions.filter(t=>t.transferId!==transferId);
+            saveTransactionChanges();
+            showToast('已刪除雙方轉帳紀錄');
+        }
         function escapeTx(text) {return String(text??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
         function transactionPanel(fundId) {
             const f=fundsData.find(x=>x.id===fundId);
             const rows=transactions.filter(t=>t.fundId===fundId).sort((a,b)=>b.date.localeCompare(a.date)||String(b.id).localeCompare(String(a.id)));
             return `<section class="mt-5 bg-[#fffaf0] border border-[#e2d5c3] rounded-3xl p-5 card-shadow">
-              <div class="flex flex-wrap items-center justify-between gap-3 mb-4"><div><h3 class="font-black text-lg">📋 存入／提領紀錄</h3><p class="text-xs text-[#947c5d]">目前餘額：$${getFundBalance(f).toLocaleString()}</p></div>
-              <div class="flex gap-2"><button onclick="openTransactionModal('${fundId}','deposit')" class="bg-[#8c6d53] text-white rounded-xl px-3 py-2 text-xs font-bold">💰 存入</button><button onclick="openTransactionModal('${fundId}','withdraw')" class="border border-[#8c6d53] text-[#614f39] rounded-xl px-3 py-2 text-xs font-bold">💸 提領</button></div></div>
-              <div class="space-y-2 max-h-96 overflow-y-auto">${rows.length?rows.map(t=>`<div class="bg-white border border-[#e2d5c3] rounded-xl p-3 flex items-center justify-between gap-2"><div class="min-w-0"><p class="text-xs text-[#947c5d]">${escapeTx(t.date)} · ${t.type==='withdraw'?'💸 提領':'💰 存入'}</p><p class="font-black ${t.type==='withdraw'?'text-red-600':'text-[#614f39]'}">${t.type==='withdraw'?'-':'+'}$${t.amount.toLocaleString()}</p><p class="text-xs break-words">${escapeTx(t.note||'無備註')}</p></div><div class="flex gap-2 shrink-0"><button onclick="openTransactionModal('${fundId}','${t.type}','${t.id}')" class="text-xs underline">編輯</button><button onclick="deleteTransaction('${t.id}')" class="text-xs text-red-600 underline">刪除</button></div></div>`).join(''):'<p class="text-xs text-[#947c5d] py-5 text-center">尚無交易紀錄</p>'}</div>
+              <div class="flex flex-wrap items-center justify-between gap-3 mb-4"><div><h3 class="font-black text-lg">📋 存入／提領紀錄</h3><p class="text-xs text-[#947c5d]">目前餘額：$${getFundBalance(f).toLocaleString()}（含轉入、轉出）</p></div>
+              <div class="flex flex-wrap gap-2"><button onclick="openTransferModal('${fundId}')" class="border border-[#8c6d53] bg-[#f0e6d6] text-[#614f39] rounded-xl px-3 py-2 text-xs font-bold">🔁 轉帳</button><button onclick="openTransactionModal('${fundId}','deposit')" class="bg-[#8c6d53] text-white rounded-xl px-3 py-2 text-xs font-bold">💰 存入</button><button onclick="openTransactionModal('${fundId}','withdraw')" class="border border-[#8c6d53] text-[#614f39] rounded-xl px-3 py-2 text-xs font-bold">💸 提領</button></div></div>
+              <div class="space-y-2 max-h-96 overflow-y-auto">${rows.length?rows.map(t=>{
+                const transfer=t.type==='transfer_out'||t.type==='transfer_in';
+                const outgoing=t.type==='withdraw'||t.type==='transfer_out';
+                const other=fundsData.find(f=>f.id===t.otherFundId);
+                const label=t.type==='transfer_out'?'🔁 轉出至 '+(other?.bank||'其他銀行'):t.type==='transfer_in'?'🔁 從 '+(other?.bank||'其他銀行')+' 轉入':t.type==='withdraw'?'💸 提領':'💰 存入';
+                return `<div class="bg-white border border-[#e2d5c3] rounded-xl p-3 flex items-center justify-between gap-2"><div class="min-w-0"><p class="text-xs text-[#947c5d]">${escapeTx(t.date)} · ${escapeTx(label)}</p><p class="font-black ${outgoing?'text-red-600':'text-[#614f39]'}">${outgoing?'-':'+'}$${Number(t.amount).toLocaleString()}</p><p class="text-xs break-words">${escapeTx(t.note||'無備註')}</p></div><div class="flex gap-2 shrink-0">${transfer?`<button onclick="deleteTransfer('${t.transferId}')" class="text-xs text-red-600 underline">刪除轉帳</button>`:`<button onclick="openTransactionModal('${fundId}','${t.type}','${t.id}')" class="text-xs underline">編輯</button><button onclick="deleteTransaction('${t.id}')" class="text-xs text-red-600 underline">刪除</button>`}</div></div>`;
+              }).join(''):'<p class="text-xs text-[#947c5d] py-5 text-center">尚無交易紀錄</p>'}</div>
             </section>`;
         }
 
@@ -683,7 +772,7 @@ function getLifetimeTotal() {
 
         function updateHeaderTotals() {
             const totalSaved = getLifetimeTotal();
-            const totalTarget = 196000;
+            const totalTarget = 204000;
             document.getElementById('headerTotalAmount').innerText = '$' + totalSaved.toLocaleString();
             const percent = Math.min(100, Math.round((totalSaved / totalTarget) * 100));
             document.getElementById('headerTotalPercent').innerText = percent + '%';
@@ -1069,7 +1158,7 @@ const fundId = 'fund8';
             } 
             else if (fund.isSummary) {
                 let totalSaved = 0;
-                let totalTarget = 196000;
+                let totalTarget = 204000;
                 let detailsHtml = '';
 
                 fundsData.forEach((f) => {
