@@ -217,7 +217,7 @@
     <!-- 銀行間轉帳：僅記帳，不會真的操作銀行帳戶 -->
     <div id="transferModal" class="fixed inset-0 bg-black/40 z-[65] hidden items-center justify-center p-4">
       <div class="bg-[#fffaf0] rounded-3xl p-6 w-full max-w-sm border border-[#e2d5c3] card-shadow">
-        <h3 class="font-black text-lg mb-3">🔁 銀行間轉帳</h3>
+        <h3 id="transferModalTitle" class="font-black text-lg mb-3">🔁 銀行間轉帳</h3>
         <p class="text-xs text-[#947c5d] mb-3">這裡只記錄轉帳，不會真的從銀行匯款。</p>
         <form onsubmit="submitTransfer(event)" class="space-y-3">
           <label class="block text-xs font-bold">轉出銀行
@@ -370,18 +370,23 @@ function getLifetimeTotal() {
             transactions=transactions.filter(x=>x.id!==id);saveTransactionChanges();showToast('交易紀錄已刪除');
         }
 
+        let editingTransferId = null;
         function transferFunds() { return fundsData.filter(f=>!f.isSummary&&!f.isWishlist&&!f.isVariableStash); }
-        function openTransferModal(fromId) {
+        function openTransferModal(fromId, transferId=null) {
+            editingTransferId=transferId;
+            const existing=transferId?transactions.find(t=>t.transferId===transferId&&t.type==='transfer_out'):null;
+            if(transferId&&!existing){showToast('找不到原始轉帳紀錄');return;}
+            document.getElementById('transferModalTitle').textContent=existing?'✏️ 編輯銀行轉帳':'🔁 銀行間轉帳';
             const funds=transferFunds();
             const options=funds.map(f=>`<option value="${f.id}">${f.bank}｜${f.name}</option>`).join('');
             document.getElementById('transferFrom').innerHTML=options;
             document.getElementById('transferTo').innerHTML=options;
-            document.getElementById('transferFrom').value=fromId;
+            document.getElementById('transferFrom').value=existing?existing.fundId:fromId;
             const to=funds.find(f=>f.id!==fromId);
-            document.getElementById('transferTo').value=to?.id||fromId;
-            document.getElementById('transferAmount').value='';
-            document.getElementById('transferDate').value=localDate();
-            document.getElementById('transferNote').value='';
+            document.getElementById('transferTo').value=existing?existing.otherFundId:(to?.id||fromId);
+            document.getElementById('transferAmount').value=existing?existing.amount:'';
+            document.getElementById('transferDate').value=existing?existing.date:localDate();
+            document.getElementById('transferNote').value=existing?(existing.note||''):'';
             document.getElementById('transferError').classList.add('hidden');
             updateTransferBalance();
             document.getElementById('transferModal').classList.remove('hidden');
@@ -389,7 +394,9 @@ function getLifetimeTotal() {
         }
         function updateTransferBalance() {
             const fund=transferFunds().find(f=>f.id===document.getElementById('transferFrom').value);
-            document.getElementById('transferAvailable').textContent='$'+(fund?getFundBalance(fund):0).toLocaleString('zh-TW');
+            const original=editingTransferId?transactions.find(t=>t.transferId===editingTransferId&&t.type==='transfer_out'):null;
+            const available=(fund?getFundBalance(fund):0)+(original&&original.fundId===fund?.id?original.amount:0)-(original&&original.otherFundId===fund?.id?original.amount:0);
+            document.getElementById('transferAvailable').textContent='$'+available.toLocaleString('zh-TW');
         }
         function closeTransferModal() {
             document.getElementById('transferModal').classList.add('hidden');
@@ -403,17 +410,32 @@ function getLifetimeTotal() {
             const date=document.getElementById('transferDate').value;
             const note=document.getElementById('transferNote').value.trim();
             const err=document.getElementById('transferError');
+            const original=editingTransferId?transactions.filter(t=>t.transferId===editingTransferId):[];
+            if(editingTransferId&&(original.length!==2||!original.some(t=>t.type==='transfer_out')||!original.some(t=>t.type==='transfer_in'))){err.textContent='原始轉帳紀錄不完整，無法編輯';err.classList.remove('hidden');return;}
             const source=transferFunds().find(f=>f.id===from);
             const destination=transferFunds().find(f=>f.id===to);
             let msg='';
             if(!source||!destination||from===to) msg='轉出與轉入銀行不能相同';
             else if(!Number.isSafeInteger(amount)||amount<=0) msg='請輸入正確的正整數金額';
             else if(!/^\d{4}-\d{2}-\d{2}$/.test(date)) msg='請選擇正確日期';
-            else if(amount>getFundBalance(source)) msg='轉帳金額不能超過轉出銀行目前餘額';
+            else {
+                // 先暫時還原舊轉帳，驗證新轉帳是否會造成任一帳戶負數。
+                const balances=Object.fromEntries(transferFunds().map(f=>[f.id,getFundBalance(f)]));
+                for(const t of original) balances[t.fundId]+=(t.type==='transfer_out'?t.amount:-t.amount);
+                if(Object.values(balances).some(v=>v<0)) msg='修改後會使原轉入銀行餘額不足，請先確認其他交易';
+                else if(amount>balances[from]) msg='轉帳金額不能超過轉出銀行目前餘額';
+            }
             if(msg) {err.textContent=msg;err.classList.remove('hidden');return;}
-            const transferId=makeId();
-            transactions.push({id:makeId(),transferId,fundId:from,otherFundId:to,type:'transfer_out',source:'transfer',amount,date,note});
-            transactions.push({id:makeId(),transferId,fundId:to,otherFundId:from,type:'transfer_in',source:'transfer',amount,date,note});
+            if(editingTransferId) {
+                const outgoing=original.find(t=>t.type==='transfer_out');
+                const incoming=original.find(t=>t.type==='transfer_in');
+                Object.assign(outgoing,{fundId:from,otherFundId:to,amount,date,note});
+                Object.assign(incoming,{fundId:to,otherFundId:from,amount,date,note});
+            } else {
+                const transferId=makeId();
+                transactions.push({id:makeId(),transferId,fundId:from,otherFundId:to,type:'transfer_out',source:'transfer',amount,date,note});
+                transactions.push({id:makeId(),transferId,fundId:to,otherFundId:from,type:'transfer_in',source:'transfer',amount,date,note});
+            }
             closeTransferModal();
             saveTransactionChanges();
             showToast('🔁 已記錄轉帳，兩邊餘額已同步更新！');
@@ -442,7 +464,7 @@ function getLifetimeTotal() {
                 const outgoing=t.type==='withdraw'||t.type==='transfer_out';
                 const other=fundsData.find(f=>f.id===t.otherFundId);
                 const label=t.type==='transfer_out'?'🔁 轉出至 '+(other?.bank||'其他銀行'):t.type==='transfer_in'?'🔁 從 '+(other?.bank||'其他銀行')+' 轉入':t.type==='withdraw'?'💸 提領':'💰 存入';
-                return `<div class="bg-white border border-[#e2d5c3] rounded-xl p-3 flex items-center justify-between gap-2"><div class="min-w-0"><p class="text-xs text-[#947c5d]">${escapeTx(t.date)} · ${escapeTx(label)}</p><p class="font-black ${outgoing?'text-red-600':'text-[#614f39]'}">${outgoing?'-':'+'}$${Number(t.amount).toLocaleString()}</p><p class="text-xs break-words">${escapeTx(t.note||'無備註')}</p></div><div class="flex gap-2 shrink-0">${transfer?`<button onclick="deleteTransfer('${t.transferId}')" class="text-xs text-red-600 underline">刪除轉帳</button>`:`<button onclick="openTransactionModal('${fundId}','${t.type}','${t.id}')" class="text-xs underline">編輯</button><button onclick="deleteTransaction('${t.id}')" class="text-xs text-red-600 underline">刪除</button>`}</div></div>`;
+                return `<div class="bg-white border border-[#e2d5c3] rounded-xl p-3 flex items-center justify-between gap-2"><div class="min-w-0"><p class="text-xs text-[#947c5d]">${escapeTx(t.date)} · ${escapeTx(label)}</p><p class="font-black ${outgoing?'text-red-600':'text-[#614f39]'}">${outgoing?'-':'+'}$${Number(t.amount).toLocaleString()}</p><p class="text-xs break-words">${escapeTx(t.note||'無備註')}</p></div><div class="flex gap-2 shrink-0">${transfer?`<button onclick="openTransferModal('${t.fundId}','${t.transferId}')" class="text-xs underline">編輯</button><button onclick="deleteTransfer('${t.transferId}')" class="text-xs text-red-600 underline">刪除轉帳</button>`:`<button onclick="openTransactionModal('${fundId}','${t.type}','${t.id}')" class="text-xs underline">編輯</button><button onclick="deleteTransaction('${t.id}')" class="text-xs text-red-600 underline">刪除</button>`}</div></div>`;
               }).join(''):'<p class="text-xs text-[#947c5d] py-5 text-center">尚無交易紀錄</p>'}</div>
             </section>`;
         }
