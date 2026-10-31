@@ -205,6 +205,7 @@
         </div>
         <form id="transactionForm" onsubmit="submitTransaction(event)" class="space-y-3">
           <label class="block text-xs font-bold">金額（元）<input id="txAmount" type="number" min="1" step="1" required class="mt-1 w-full border rounded-xl p-3 bg-white"></label>
+          <label id="txMonthWrap" class="block text-xs font-bold">歸入哪一個月（同步月份卡片）<select id="txMonth" class="mt-1 w-full border rounded-xl p-3 bg-white"></select></label>
           <label class="block text-xs font-bold">日期<input id="txDate" type="date" required class="mt-1 w-full border rounded-xl p-3 bg-white"></label>
           <label class="block text-xs font-bold">用途／備註<input id="txNote" type="text" maxlength="160" placeholder="例如：臨時支出、每月存款" class="mt-1 w-full border rounded-xl p-3 bg-white"></label>
           <p id="txError" class="text-xs text-red-600 hidden"></p>
@@ -307,19 +308,24 @@ function getLifetimeTotal() {
             else for(let i=1;i<=fund.months;i++) base+=Number(st[i])||0;
             return base+fundAdjustment(fund.id);
         }
-        // 將提領分配到最近一個仍有餘額的月份；僅計算顯示值，不重複扣除基金總額。
+        // 舊版額外存入紀錄可能只有備註「第 11 個月手動存款」，自動歸回原月份。
+        function transactionMonth(t, fund) {
+            if (Number.isInteger(Number(t.month)) && Number(t.month)>=1 && Number(t.month)<=fund.months) return Number(t.month);
+            const m=String(t.note||'').match(/第\s*(\d+)\s*個月/);
+            if (m && Number(m[1])>=1 && Number(m[1])<=fund.months) return Number(m[1]);
+            const d=String(t.date||'').match(/^\d{4}-(\d{2})-/);
+            return d ? Math.min(fund.months,Number(d[1])) : fund.months;
+        }
         function getMonthlyNetAmounts(fund) {
-            const st = savedState[fund.id] || {};
-            const amounts = {};
-            for (let m = 1; m <= fund.months; m++) amounts[m] = Math.max(0, Number(st[m]) || 0);
-            // 先從最近已存款月份扣除，扣完再往前一個月份扣。
-            let withdrawn = transactions.filter(t => t.fundId === fund.id && (t.type === 'withdraw' || t.type === 'transfer_out'))
-                .reduce((sum,t) => sum + (Number(t.amount) || 0), 0);
-            for (let m = fund.months; m >= 1 && withdrawn > 0; m--) {
-                const deducted = Math.min(amounts[m], withdrawn);
-                amounts[m] -= deducted;
-                withdrawn -= deducted;
-            }
+            const st=savedState[fund.id]||{};
+            const amounts={};
+            for(let m=1;m<=fund.months;m++) amounts[m]=Math.max(0,Number(st[m])||0);
+            // 額外存入與轉入必須同步反映在月份卡片，不能只出現在交易紀錄。
+            transactions.filter(t=>t.fundId===fund.id&&(t.source==='extra'||t.type==='transfer_in'))
+                .forEach(t=>{const m=transactionMonth(t,fund);amounts[m]+=(Number(t.amount)||0);});
+            let withdrawn=transactions.filter(t=>t.fundId===fund.id&&(t.type==='withdraw'||t.type==='transfer_out'))
+                .reduce((sum,t)=>sum+(Number(t.amount)||0),0);
+            for(let m=fund.months;m>=1&&withdrawn>0;m--){const d=Math.min(amounts[m],withdrawn);amounts[m]-=d;withdrawn-=d;}
             return amounts;
         }
         function saveTransactionChanges() { persistTransactions(); saveAppData(); renderApp(); }
@@ -333,6 +339,10 @@ function getLifetimeTotal() {
             document.getElementById('transactionModalTitle').textContent=(old?'編輯':'新增')+(transactionDraft.type==='withdraw'?'提領':'存入')+'｜'+fund.bank;
             document.getElementById('txBalanceLabel').textContent = fund.bank + '｜目前紀錄餘額';
             document.getElementById('txCurrentBalance').textContent = '$' + getFundBalance(fund).toLocaleString('zh-TW');
+            const monthWrap=document.getElementById('txMonthWrap');
+            monthWrap.classList.toggle('hidden',fund.isVariableStash || transactionDraft.type==='withdraw' || old?.source==='stash');
+            document.getElementById('txMonth').innerHTML=Array.from({length:fund.months||12},(_,i)=>`<option value="${i+1}">第 ${i+1} 個月</option>`).join('');
+            document.getElementById('txMonth').value=old?transactionMonth(old,fund):String(new Date().getMonth()+1);
             document.getElementById('txAmount').value=old?.amount||'';
             document.getElementById('txDate').value=old?.date||localDate();
             document.getElementById('txNote').value=old?.note||'';
@@ -347,6 +357,7 @@ function getLifetimeTotal() {
             const amount=Number(document.getElementById('txAmount').value);
             const date=document.getElementById('txDate').value;
             const note=document.getElementById('txNote').value.trim();
+            const selectedMonth=Number(document.getElementById('txMonth').value);
             const error=document.getElementById('txError');
             if(!Number.isSafeInteger(amount)||amount<=0||!/^\d{4}-\d{2}-\d{2}$/.test(date)) { error.textContent='請輸入正確的日期及正整數金額';error.classList.remove('hidden');return; }
             const {fundId,type,id}=transactionDraft;
@@ -358,8 +369,8 @@ function getLifetimeTotal() {
             if(old) {
                 if(old.source==='month') { const st=savedState[fundId]||{};st[old.month]=amount;savedState[fundId]=st; }
                 if(old.source==='stash') {const r=(savedState[fundId]?.records||[]).find(r=>r.id===old.sourceId);if(r){r.amount=amount;r.date=date;r.note=note;}}
-                Object.assign(old,{amount,date,note});
-            } else transactions.push({id:makeId(),fundId,type,source:type==='withdraw'?'withdraw':'extra',amount,date,note});
+                Object.assign(old,{amount,date,note,...(old.source==='extra'?{month:selectedMonth}:{})});
+            } else transactions.push({id:makeId(),fundId,type,source:type==='withdraw'?'withdraw':'extra',amount,date,note,...(type==='withdraw'?{}:{month:selectedMonth})});
             closeTransactionModal();saveTransactionChanges();showToast('交易紀錄已儲存！');
         }
         async function deleteTransaction(id) {
@@ -1068,6 +1079,7 @@ const fundId = 'fund8';
                     const monthData = fundState[i];
                     const savedAmount = monthlyNetAmounts[i];
                     const hasSaved = savedAmount > 0;
+                    const hasOriginalMonthDeposit = Number(fundState[i]) > 0;
                     const cardBgClass = hasSaved ? 'bg-[#f0e6d6] border-[#b09978] shadow-xs' : 'bg-white border-[#e2d5c3] hover:border-[#b09978]';
 
                     html += `
@@ -1086,7 +1098,7 @@ const fundId = 'fund8';
                             </div>
                             <div class="pt-2.5 border-t border-[#e2d5c3]/50 flex gap-1.5">
                                 <button onclick="quickDeposit('${fund.id}', ${i}, ${fund.monthly})" class="flex-1 py-1.5 px-2 bg-[#b09978] hover:bg-[#947c5d] text-white rounded-xl text-[11px] font-bold transition-all shadow-xs truncate" title="點擊存預定金額，再次點擊可取消">
-                                    ${hasSaved ? '已存 (點擊取消)' : '存預定金額'}
+                                    ${hasOriginalMonthDeposit ? '已存 (點擊取消)' : '存預定金額'}
                                 </button>
                                 <button onclick="manualDeposit('${fund.id}', ${i})" class="py-1.5 px-2.5 bg-[#8c6d53] hover:bg-[#614f39] text-white rounded-xl text-[11px] font-bold transition-all shadow-xs" title="手動輸入金額">
                                     <i class="fa-solid fa-pen"></i>
