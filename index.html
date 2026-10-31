@@ -398,27 +398,30 @@ function getLifetimeTotal() {
             closeTransactionModal();saveTransactionChanges();showToast('交易紀錄已儲存！');
         }
         async function deleteTransaction(id) {
-            const t=transactions.find(t=>t.id===id); if(!t)return;
-            const f=fundsData.find(f=>f.id===t.fundId);
-            if(!f)return;
-            // 若刪除存款會讓餘額不足，禁止操作；避免刪除後產生負數。
-            const storedMonth=Number((savedState[t.fundId]||{})[t.month])||0;
-            const effectiveDeposit=t.source==='month'?storedMonth:t.source==='stash'?Number((savedState[t.fundId]?.records||[]).find(r=>r.id===t.sourceId)?.amount)||0:t.source==='extra'?Number(t.amount)||0:0;
-            if(effectiveDeposit>0 && getFundBalance(f)-effectiveDeposit<0) {
-                showToast('⚠️ 刪除後餘額會變負數，請先核對提領或轉帳紀錄','error'); return;
-            }
-            if(!await showCustomModal('刪除交易','確定要刪除這筆交易紀錄嗎？','none'))return;
+            const t=transactions.find(x=>x.id===id);
+            if(!t) { showToast('找不到交易，請重新整理後再試','error'); return; }
+            const fund=fundsData.find(f=>f.id===t.fundId);
+            if(!fund) return;
+            const balanceBefore=getFundBalance(fund);
+            const st=savedState[t.fundId]||{};
+            const depositEffect=t.source==='month' ? Number(st[t.month])||0
+                : t.source==='stash' ? Number((st.records||[]).find(r=>r.id===t.sourceId)?.amount)||0
+                : t.type==='withdraw' ? -Number(t.amount)||0
+                : t.source==='extra' ? Number(t.amount)||0 : 0;
+            const balanceAfter=balanceBefore-depositEffect;
+            const message=balanceAfter<0
+                ? `刪除後記帳餘額將是 $${balanceAfter.toLocaleString()}（負數）。這通常表示先前存款與提領紀錄未對齊。仍要刪除這筆紀錄嗎？`
+                : `確定刪除這筆 ${t.type==='withdraw'?'提領':'存款'} $${Number(t.amount).toLocaleString()} 嗎？`;
+            if(!await showCustomModal('確認刪除交易',message,'none')) return;
             if(t.source==='month') {
-                const st=savedState[t.fundId]||{};
-                // 只移除與這筆交易相符的月份原始存款，不再做第二次扣款。
+                // 月份資料是這筆交易的實際來源，只清除一次，不再額外扣款。
                 delete st[t.month]; savedState[t.fundId]=st;
-            }
-            if(t.source==='stash') {
-                const st=savedState[t.fundId]||{};
-                st.records=(st.records||[]).filter(r=>r.id!==t.sourceId); savedState[t.fundId]=st;
+            } else if(t.source==='stash') {
+                st.records=(st.records||[]).filter(r=>r.id!==t.sourceId);savedState[t.fundId]=st;
             }
             transactions=transactions.filter(x=>x.id!==id);
-            saveTransactionChanges(); showToast('交易紀錄已刪除');
+            saveTransactionChanges();
+            showToast(balanceAfter<0?'已刪除，請核對其他存提款紀錄':'交易紀錄已刪除');
         }
 
         let editingTransferId = null;
@@ -902,20 +905,11 @@ function getLifetimeTotal() {
         }
 
         function getFundStats(fundIndex) {
-            const fund = fundsData[fundIndex];
-            const fundState = savedState[fund.id] || {};
-            let currentAmount = 0;
-
-            for (let i = 1; i <= fund.months; i++) {
-                if (fundState[i] && typeof fundState[i] === 'number') {
-                    currentAmount += fundState[i];
-                }
-            }
-            currentAmount += fundAdjustment(fund.id);
-            const target = fund.target;
-            const percentage = Math.max(0, Math.min(100, Math.round((currentAmount / target) * 100)));
-            const remaining = Math.max(0, target - currentAmount);
-            return { currentAmount, target, percentage, remaining };
+            const fund=fundsData[fundIndex];
+            const currentAmount=getFundBalance(fund);
+            const target=fund.target;
+            const percentage=target>0?Math.max(0,Math.min(100,Math.round(currentAmount/target*100))):0;
+            return {currentAmount,target,percentage,remaining:Math.max(0,target-currentAmount)};
         }
 
         async function quickDeposit(fundId, monthIndex, defaultMonthly) {
@@ -934,6 +928,8 @@ function getLifetimeTotal() {
                     showToast('已取消該月份存款紀錄', 'info');
                 }
             } else {
+                const extra=transactions.find(t=>t.fundId===fundId && t.source==='extra' && transactionMonth(t,fundsData.find(f=>f.id===fundId))===monthIndex);
+                if(extra) { showToast('此月份已有存入紀錄，請在下方交易紀錄按「編輯」，避免重複存入','error'); return; }
                 fundState[monthIndex] = defaultMonthly;
                 transactions.push({id:makeId(),fundId,type:'deposit',source:'month',month:monthIndex,amount:defaultMonthly,date:localDate(),note:`第 ${monthIndex} 個月預定存款`});persistTransactions();
                 savedState[fundId] = fundState;
@@ -951,6 +947,8 @@ function getLifetimeTotal() {
 
             const val = await showCustomModal('手動輸入存入金額', `請輸入第 ${monthIndex} 個月實際存入 ${fund.bank} 的金額 ($)：`, 'single', currentVal);
             if (val !== false && !isNaN(val) && val > 0) {
+                const extra=transactions.find(t=>t.fundId===fundId && t.source==='extra' && transactionMonth(t,fund)===monthIndex);
+                if(extra && !(Number(fundState[monthIndex])>0)) { showToast('此月份已有存入紀錄，請在下方交易紀錄編輯原金額，避免重複計算','error'); return; }
                 if(getFundBalance(fund)-(Number(fundState[monthIndex])||0)+Number(val)<0){showToast('修改後餘額會變負數，請先核對提領紀錄','error');return;}
                 fundState[monthIndex] = val;
                 const existingTx=transactions.find(t=>t.fundId===fundId && t.source==='month' && t.month===monthIndex);
