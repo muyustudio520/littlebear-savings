@@ -315,7 +315,10 @@ function getLifetimeTotal() {
             const st=savedState[fund.id]||{};
             let base=0;
             if(fund.isVariableStash) (st.records||[]).forEach(r=>base+=Number(r.amount)||0);
-            else for(let i=1;i<=fund.months;i++) base+=Number(st[i])||0;
+            else {
+                for(let i=1;i<=fund.months;i++) base+=Number(st[i])||0;
+                transactions.filter(t=>t.fundId===fund.id && t.type==='deposit' && t.source==='month').forEach(t=>{const m=transactionMonth(t,fund);if(!(Number(st[m])>0))base+=Number(t.amount)||0;});
+            }
             return base+fundAdjustment(fund.id);
         }
         // 舊版額外存入紀錄可能只有備註「第 11 個月手動存款」，自動歸回原月份。
@@ -330,6 +333,7 @@ function getLifetimeTotal() {
             const st=savedState[fund.id]||{};
             const amounts={};
             for(let m=1;m<=fund.months;m++) amounts[m]=Math.max(0,Number(st[m])||0);
+            transactions.filter(t=>t.fundId===fund.id && t.type==='deposit' && t.source==='month').forEach(t=>{const m=transactionMonth(t,fund);if(!(Number(st[m])>0)) amounts[m]+=(Number(t.amount)||0);});
             // 額外存入與轉入必須同步反映在月份卡片，不能只出現在交易紀錄。
             transactions.filter(t=>t.fundId===fund.id&&(t.source==='extra'||t.type==='transfer_in'))
                 .forEach(t=>{const m=transactionMonth(t,fund);amounts[m]+=(Number(t.amount)||0);});
@@ -343,8 +347,8 @@ function getLifetimeTotal() {
             const st=savedState[fund.id]||{};
             const amounts={};
             for(let m=1;m<=fund.months;m++) amounts[m]=Math.max(0,Number(st[m])||0);
-            transactions.filter(t=>t.fundId===fund.id && t.source==='extra' && t.type==='deposit')
-                .forEach(t=>{const m=transactionMonth(t,fund);amounts[m]+=(Number(t.amount)||0);});
+            transactions.filter(t=>t.fundId===fund.id && t.type==='deposit' && (t.source==='extra'||t.source==='month'))
+                .forEach(t=>{const m=transactionMonth(t,fund);if(t.source==='month'){if(!(Number(st[m])>0))amounts[m]+=(Number(t.amount)||0);}else amounts[m]+=(Number(t.amount)||0);});
             return amounts;
         }
         function saveTransactionChanges() { persistTransactions(); saveAppData(); renderApp(); }
@@ -385,7 +389,7 @@ function getLifetimeTotal() {
             const balance=getFundBalance(fundsData.find(f=>f.id===fundId));
             const oldEffect=old ? (old.source==='month' || old.source==='stash' ? (old.type==='withdraw'?-old.amount:old.amount) : (old.type==='withdraw'?-old.amount:old.amount)) : 0;
             const newEffect=type==='withdraw'?-amount:amount;
-            if(balance-oldEffect+newEffect<0) {error.textContent='修改後餘額會變成負數，請先核對原有紀錄';error.classList.remove('hidden');return;}
+            if(type==='withdraw' && balance-oldEffect+newEffect<0) {error.textContent='提領金額超過目前紀錄餘額';error.classList.remove('hidden');return;}
             if(old) {
                 if(old.source==='month') {
                     const st=savedState[fundId]||{};
@@ -413,13 +417,13 @@ function getLifetimeTotal() {
             if(!fund) return;
             const balanceBefore=getFundBalance(fund);
             const st=savedState[t.fundId]||{};
-            const depositEffect=t.source==='month' ? Number(st[t.month])||0
+            const depositEffect=t.source==='month' ? (Number(st[t.month])||Number(t.amount)||0)
                 : t.source==='stash' ? Number((st.records||[]).find(r=>r.id===t.sourceId)?.amount)||0
                 : t.type==='withdraw' ? -Number(t.amount)||0
                 : t.source==='extra' ? Number(t.amount)||0 : 0;
             const balanceAfter=balanceBefore-depositEffect;
             const message=balanceAfter<0
-                ? `刪除後記帳餘額將是 $${balanceAfter.toLocaleString()}（負數）。這通常表示先前存款與提領紀錄未對齊。仍要刪除這筆紀錄嗎？`
+                ? `刪除後記帳餘額將是 $${balanceAfter.toLocaleString()}。這是其他提領紀錄超過存款的結果，不代表銀行實際負債。確定刪除嗎？`
                 : `確定刪除這筆 ${t.type==='withdraw'?'提領':'存款'} $${Number(t.amount).toLocaleString()} 嗎？`;
             if(!await showCustomModal('確認刪除交易',message,'none')) return;
             if(t.source==='month') {
@@ -874,6 +878,7 @@ function getLifetimeTotal() {
         }
 
         function saveAppData() {
+            persistTransactions();
             localStorage.setItem('bear_savings_state_v8', JSON.stringify(savedState));
             localStorage.setItem('bear_wishlist_v8', JSON.stringify(wishlistData));
             updateHeaderTotals();
@@ -925,10 +930,9 @@ function getLifetimeTotal() {
             const fundState = savedState[fundId] || {};
             const currentVal = fundState[monthIndex];
 
-            if (currentVal && currentVal > 0) {
+            if (Number(currentVal) > 0) {
                 const confirmed = await showCustomModal('取消存款確認', `第 ${monthIndex} 個月目前已存入 $${currentVal.toLocaleString()}。請問是否要取消此筆存款紀錄？`, 'none');
                 if (confirmed) {
-                    if(getFundBalance(fundsData.find(f=>f.id===fundId))-Number(currentVal)<0){showToast('取消後餘額會變負數，請先核對提領紀錄','error');return;}
                     delete fundState[monthIndex];
                     transactions=transactions.filter(t=>!(t.fundId===fundId && t.source==='month' && t.month===monthIndex));persistTransactions();
                     savedState[fundId] = fundState;
@@ -937,7 +941,7 @@ function getLifetimeTotal() {
                     showToast('已取消該月份存款紀錄', 'info');
                 }
             } else {
-                const extra=transactions.find(t=>t.fundId===fundId && t.source==='extra' && transactionMonth(t,fundsData.find(f=>f.id===fundId))===monthIndex);
+                const extra=transactions.find(t=>t.fundId===fundId && t.type==='deposit' && (t.source==='extra'||t.source==='month') && transactionMonth(t,fundsData.find(f=>f.id===fundId))===monthIndex);
                 if(extra) { showToast('此月份已有存入紀錄，請在下方交易紀錄按「編輯」，避免重複存入','error'); return; }
                 fundState[monthIndex] = defaultMonthly;
                 transactions.push({id:makeId(),fundId,type:'deposit',source:'month',month:monthIndex,amount:defaultMonthly,date:localDate(),note:`第 ${monthIndex} 個月預定存款`});persistTransactions();
@@ -958,7 +962,6 @@ function getLifetimeTotal() {
             if (val !== false && !isNaN(val) && val > 0) {
                 const extra=transactions.find(t=>t.fundId===fundId && t.source==='extra' && transactionMonth(t,fund)===monthIndex);
                 if(extra && !(Number(fundState[monthIndex])>0)) { showToast('此月份已有存入紀錄，請在下方交易紀錄編輯原金額，避免重複計算','error'); return; }
-                if(getFundBalance(fund)-(Number(fundState[monthIndex])||0)+Number(val)<0){showToast('修改後餘額會變負數，請先核對提領紀錄','error');return;}
                 fundState[monthIndex] = val;
                 const existingTx=transactions.find(t=>t.fundId===fundId && t.source==='month' && t.month===monthIndex);
                 if(existingTx) existingTx.amount=val; else transactions.push({id:makeId(),fundId,type:'deposit',source:'month',month:monthIndex,amount:val,date:localDate(),note:`第 ${monthIndex} 個月手動存款`});persistTransactions();
@@ -1156,6 +1159,7 @@ const fundId = 'fund8';
                     const depositedAmount = monthlyDepositAmounts[i];
                     const hasSaved = depositedAmount > 0;
                     const hasOriginalMonthDeposit = Number(fundState[i]) > 0;
+                    const hasExtraMonthDeposit = transactions.some(t=>t.fundId===fund.id && t.source==='extra' && t.type==='deposit' && transactionMonth(t,fund)===i);
                     const cardBgClass = hasSaved ? 'bg-[#f0e6d6] border-[#b09978] shadow-xs' : 'bg-white border-[#e2d5c3] hover:border-[#b09978]';
 
                     html += `
@@ -1166,7 +1170,7 @@ const fundId = 'fund8';
                                     <span class="text-[10px] text-[#947c5d]">預定 $${fund.monthly.toLocaleString()}</span>
                                 </div>
                                 <div class="my-1.5">
-                                    <p class="text-[10px] text-[#947c5d]">本月累計存入</p>
+                                    <p class="text-[10px] text-[#947c5d]">本月累計存入（可提前記錄）</p>
                                     <p class="text-base font-extrabold ${hasSaved ? 'text-[#614f39]' : 'text-[#cbb79d]'}">
                                         $${depositedAmount.toLocaleString()}
                                     </p>
@@ -1175,7 +1179,7 @@ const fundId = 'fund8';
                             </div>
                             <div class="pt-2.5 border-t border-[#e2d5c3]/50 flex gap-1.5">
                                 <button onclick="quickDeposit('${fund.id}', ${i}, ${fund.monthly})" class="flex-1 py-1.5 px-2 bg-[#b09978] hover:bg-[#947c5d] text-white rounded-xl text-[11px] font-bold transition-all shadow-xs truncate" title="點擊存預定金額，再次點擊可取消">
-                                    ${hasOriginalMonthDeposit ? '已存 (點擊取消)' : '存預定金額'}
+                                    ${hasOriginalMonthDeposit ? '已存 (點擊取消)' : hasExtraMonthDeposit ? '已有存款 (下方編輯)' : '存預定金額'}
                                 </button>
                                 <button onclick="manualDeposit('${fund.id}', ${i})" class="py-1.5 px-2.5 bg-[#8c6d53] hover:bg-[#614f39] text-white rounded-xl text-[11px] font-bold transition-all shadow-xs" title="手動輸入金額">
                                     <i class="fa-solid fa-pen"></i>
