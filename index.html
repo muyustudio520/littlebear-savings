@@ -338,6 +338,15 @@ function getLifetimeTotal() {
             for(let m=fund.months;m>=1&&withdrawn>0;m--){const d=Math.min(amounts[m],withdrawn);amounts[m]-=d;withdrawn-=d;}
             return amounts;
         }
+        // 月份卡片「存入」顯示實際記錄的存入總額，不受其他月份提領影響。
+        function getMonthlyDepositAmounts(fund) {
+            const st=savedState[fund.id]||{};
+            const amounts={};
+            for(let m=1;m<=fund.months;m++) amounts[m]=Math.max(0,Number(st[m])||0);
+            transactions.filter(t=>t.fundId===fund.id && t.source==='extra' && t.type==='deposit')
+                .forEach(t=>{const m=transactionMonth(t,fund);amounts[m]+=(Number(t.amount)||0);});
+            return amounts;
+        }
         function saveTransactionChanges() { persistTransactions(); saveAppData(); renderApp(); }
         let transactionDraft=null;
         function openTransactionModal(fundId,type,id=null) {
@@ -1140,10 +1149,12 @@ const fundId = 'fund8';
                 `;
 
                 const monthlyNetAmounts = getMonthlyNetAmounts(fund);
+                const monthlyDepositAmounts = getMonthlyDepositAmounts(fund);
                 for (let i = 1; i <= fund.months; i++) {
                     const monthData = fundState[i];
                     const savedAmount = monthlyNetAmounts[i];
-                    const hasSaved = savedAmount > 0;
+                    const depositedAmount = monthlyDepositAmounts[i];
+                    const hasSaved = depositedAmount > 0;
                     const hasOriginalMonthDeposit = Number(fundState[i]) > 0;
                     const cardBgClass = hasSaved ? 'bg-[#f0e6d6] border-[#b09978] shadow-xs' : 'bg-white border-[#e2d5c3] hover:border-[#b09978]';
 
@@ -1155,10 +1166,11 @@ const fundId = 'fund8';
                                     <span class="text-[10px] text-[#947c5d]">預定 $${fund.monthly.toLocaleString()}</span>
                                 </div>
                                 <div class="my-1.5">
-                                    <p class="text-[10px] text-[#947c5d]">目前剩餘金額</p>
+                                    <p class="text-[10px] text-[#947c5d]">本月累計存入</p>
                                     <p class="text-base font-extrabold ${hasSaved ? 'text-[#614f39]' : 'text-[#cbb79d]'}">
-                                        ${hasSaved ? '$' + savedAmount.toLocaleString() : '$0'}
+                                        $${depositedAmount.toLocaleString()}
                                     </p>
+                                    ${depositedAmount !== savedAmount ? `<p class="text-[10px] text-[#947c5d] mt-1">提領／轉帳分攤後剩餘 $${savedAmount.toLocaleString()}</p>` : ''}
                                 </div>
                             </div>
                             <div class="pt-2.5 border-t border-[#e2d5c3]/50 flex gap-1.5">
