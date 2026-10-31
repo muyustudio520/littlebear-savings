@@ -140,6 +140,11 @@
                     <i class="fa-solid fa-cloud-arrow-up"></i> 同步目前資料到 Google Drive
                 </button>
 
+                <button onclick="safeLogout()" class="w-full py-3.5 bg-[#f0e6d6] border-2 border-[#8c6d53] text-[#614f39] rounded-2xl font-bold text-sm shadow-sm">
+                    <i class="fa-solid fa-right-from-bracket"></i> 儲存並登出 Google
+                </button>
+                <p class="text-[11px] text-[#947c5d] text-left">登出會先將資料儲存到本機，再嘗試同步 Google Drive。只有雲端同步成功才會登出；失敗時不會假裝已備份。</p>
+
                 <button onclick="loadFromGoogleDrive()" class="w-full py-3.5 bg-white border border-[#d4c5b9] text-[#796348] hover:bg-[#f7f4ee] rounded-2xl font-bold text-sm shadow-sm transition-all flex items-center justify-center gap-2">
                     <i class="fa-solid fa-cloud-arrow-down"></i> 從 Google Drive 載回資料
                 </button>
@@ -299,6 +304,11 @@ function getLifetimeTotal() {
             const d = value ? new Date(value) : new Date();
             return Number.isNaN(d.getTime()) ? localDate() : `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
         }
+        function markUnsynced() {
+            localStorage.setItem('little_bear_unsynced', '1');
+            localStorage.setItem('little_bear_last_local_save', new Date().toISOString());
+            setCloudStatus('已存於此裝置 · 尚未確認雲端同步');
+        }
         function persistTransactions() { localStorage.setItem('little_bear_transactions_v1',JSON.stringify(transactions)); }
         function fundAdjustment(fundId) { return transactions.filter(t=>t.fundId===fundId && (t.type==='withdraw' || t.type==='transfer_out' || t.type==='transfer_in' || t.source==='extra')).reduce((a,t)=>a+((t.type==='withdraw'||t.type==='transfer_out')?-t.amount:t.amount),0); }
         function getFundBalance(fund) {
@@ -361,24 +371,54 @@ function getLifetimeTotal() {
             const error=document.getElementById('txError');
             if(!Number.isSafeInteger(amount)||amount<=0||!/^\d{4}-\d{2}-\d{2}$/.test(date)) { error.textContent='請輸入正確的日期及正整數金額';error.classList.remove('hidden');return; }
             const {fundId,type,id}=transactionDraft;
+            const fund=fundsData.find(f=>f.id===fundId);
             const old=id?transactions.find(t=>t.id===id):null;
             const balance=getFundBalance(fundsData.find(f=>f.id===fundId));
-            const oldEffect=old?(old.type==='withdraw'?-old.amount:old.amount):0;
+            const oldEffect=old ? (old.source==='month' || old.source==='stash' ? (old.type==='withdraw'?-old.amount:old.amount) : (old.type==='withdraw'?-old.amount:old.amount)) : 0;
             const newEffect=type==='withdraw'?-amount:amount;
-            if(balance-oldEffect+newEffect<0) {error.textContent='提領金額不能超過目前可用餘額';error.classList.remove('hidden');return;}
+            if(balance-oldEffect+newEffect<0) {error.textContent='修改後餘額會變成負數，請先核對原有紀錄';error.classList.remove('hidden');return;}
             if(old) {
-                if(old.source==='month') { const st=savedState[fundId]||{};st[old.month]=amount;savedState[fundId]=st; }
-                if(old.source==='stash') {const r=(savedState[fundId]?.records||[]).find(r=>r.id===old.sourceId);if(r){r.amount=amount;r.date=date;r.note=note;}}
+                if(old.source==='month') {
+                    const st=savedState[fundId]||{};
+                    const previousMonth=Number(old.month);
+                    if(previousMonth!==selectedMonth && !fund.isVariableStash) {
+                        if(Number(st[selectedMonth])>0) {error.textContent='新月份已有存款，請先確認避免覆蓋';error.classList.remove('hidden');return;}
+                        delete st[previousMonth];
+                    }
+                    st[selectedMonth]=amount; savedState[fundId]=st;
+                    old.month=selectedMonth;
+                } else if(old.source==='stash') {
+                    const r=(savedState[fundId]?.records||[]).find(r=>r.id===old.sourceId);
+                    if(r){r.amount=amount;r.date=date;r.note=note;}
+                }
                 Object.assign(old,{amount,date,note,...(old.source==='extra'?{month:selectedMonth}:{})});
-            } else transactions.push({id:makeId(),fundId,type,source:type==='withdraw'?'withdraw':'extra',amount,date,note,...(type==='withdraw'?{}:{month:selectedMonth})});
+            } else {
+                transactions.push({id:makeId(),fundId,type,source:type==='withdraw'?'withdraw':'extra',amount,date,note,...(type==='withdraw'?{}:{month:selectedMonth})});
+            }
             closeTransactionModal();saveTransactionChanges();showToast('交易紀錄已儲存！');
         }
         async function deleteTransaction(id) {
-            const t=transactions.find(t=>t.id===id);if(!t)return;
+            const t=transactions.find(t=>t.id===id); if(!t)return;
+            const f=fundsData.find(f=>f.id===t.fundId);
+            if(!f)return;
+            // 若刪除存款會讓餘額不足，禁止操作；避免刪除後產生負數。
+            const storedMonth=Number((savedState[t.fundId]||{})[t.month])||0;
+            const effectiveDeposit=t.source==='month'?storedMonth:t.source==='stash'?Number((savedState[t.fundId]?.records||[]).find(r=>r.id===t.sourceId)?.amount)||0:t.source==='extra'?Number(t.amount)||0:0;
+            if(effectiveDeposit>0 && getFundBalance(f)-effectiveDeposit<0) {
+                showToast('⚠️ 刪除後餘額會變負數，請先核對提領或轉帳紀錄','error'); return;
+            }
             if(!await showCustomModal('刪除交易','確定要刪除這筆交易紀錄嗎？','none'))return;
-            if(t.source==='month') {const st=savedState[t.fundId]||{};delete st[t.month];savedState[t.fundId]=st;}
-            if(t.source==='stash') {const st=savedState[t.fundId]||{};st.records=(st.records||[]).filter(r=>r.id!==t.sourceId);savedState[t.fundId]=st;}
-            transactions=transactions.filter(x=>x.id!==id);saveTransactionChanges();showToast('交易紀錄已刪除');
+            if(t.source==='month') {
+                const st=savedState[t.fundId]||{};
+                // 只移除與這筆交易相符的月份原始存款，不再做第二次扣款。
+                delete st[t.month]; savedState[t.fundId]=st;
+            }
+            if(t.source==='stash') {
+                const st=savedState[t.fundId]||{};
+                st.records=(st.records||[]).filter(r=>r.id!==t.sourceId); savedState[t.fundId]=st;
+            }
+            transactions=transactions.filter(x=>x.id!==id);
+            saveTransactionChanges(); showToast('交易紀錄已刪除');
         }
 
         let editingTransferId = null;
@@ -468,7 +508,7 @@ function getLifetimeTotal() {
             const f=fundsData.find(x=>x.id===fundId);
             const rows=transactions.filter(t=>t.fundId===fundId).sort((a,b)=>b.date.localeCompare(a.date)||String(b.id).localeCompare(String(a.id)));
             return `<section class="mt-5 bg-[#fffaf0] border border-[#e2d5c3] rounded-3xl p-5 card-shadow">
-              <div class="flex flex-wrap items-center justify-between gap-3 mb-4"><div><h3 class="font-black text-lg">📋 存入／提領紀錄</h3><p class="text-xs text-[#947c5d]">目前餘額：$${getFundBalance(f).toLocaleString()}（含轉入、轉出）</p></div>
+              <div class="flex flex-wrap items-center justify-between gap-3 mb-4"><div><h3 class="font-black text-lg">📋 存入／提領紀錄</h3><p class="text-xs text-[#947c5d]">目前餘額：$${getFundBalance(f).toLocaleString()}（含轉入、轉出）</p>${getFundBalance(f)<0?'<p class="text-xs text-red-600 font-bold">⚠️ 紀錄出現負數，請先核對原始交易與備份，勿重複存款。</p>':''}</div>
               <div class="flex flex-wrap gap-2"><button onclick="openTransferModal('${fundId}')" class="border border-[#8c6d53] bg-[#f0e6d6] text-[#614f39] rounded-xl px-3 py-2 text-xs font-bold">🔁 轉帳</button><button onclick="openTransactionModal('${fundId}','deposit')" class="bg-[#8c6d53] text-white rounded-xl px-3 py-2 text-xs font-bold">💰 存入</button><button onclick="openTransactionModal('${fundId}','withdraw')" class="border border-[#8c6d53] text-[#614f39] rounded-xl px-3 py-2 text-xs font-bold">💸 提領</button></div></div>
               <div class="space-y-2 max-h-96 overflow-y-auto">${rows.length?rows.map(t=>{
                 const transfer=t.type==='transfer_out'||t.type==='transfer_in';
@@ -620,6 +660,25 @@ function getLifetimeTotal() {
             }
         }
 
+        async function safeLogout() {
+            // 不清除本機資料；登入 Google 與雲端同步是兩件事。
+            persistTransactions();
+            localStorage.setItem('bear_savings_state_v8',JSON.stringify(savedState));
+            localStorage.setItem('bear_wishlist_v8',JSON.stringify(wishlistData));
+            localStorage.setItem('little_bear_lifetime_base',String(lifetimeBase));
+            if(!googleAccessToken) {
+                setCloudStatus('未登入 Google · 資料已保留在此裝置（未確認雲端同步）');
+                showToast('本機已儲存；尚未登入 Google，無法確認雲端備份');
+                return;
+            }
+            const ok=await saveToGoogleDrive();
+            if(!ok){showToast('⚠️ 雲端備份失敗，已取消登出；請稍後重試','error');return;}
+            try { if(window.google?.accounts?.oauth2?.revoke) google.accounts.oauth2.revoke(googleAccessToken,()=>{}); }catch(e){}
+            googleAccessToken='';
+            setCloudStatus('✅ 雲端備份成功 · 已登出 Google · 本機資料保留');
+            showToast('☁️ 已同步並登出 Google，資料仍保留在此裝置！');
+        }
+
         function buildCloudData() {
             return {
                 savingsState: savedState,
@@ -660,10 +719,15 @@ function getLifetimeTotal() {
                     body
                 });
                 if (!res.ok) throw new Error('Google Drive 同步失敗');
-                setCloudStatus('已同步至 Google Drive');
+                localStorage.setItem('little_bear_unsynced','0');
+                localStorage.setItem('little_bear_last_cloud_save',new Date().toISOString());
+                setCloudStatus('☁️ 已同步至 Google Drive · '+new Date().toLocaleString('zh-TW'));
                 showToast('☁️ 資料已同步到 Google Drive！', 'success');
+                return true;
             } catch (err) {
+                setCloudStatus('⚠️ 雲端同步失敗 · 本機資料仍保留');
                 showToast('❌ ' + err.message, 'error');
+                return false;
             }
         }
 
@@ -801,13 +865,14 @@ function getLifetimeTotal() {
             localStorage.setItem('bear_savings_state_v8', JSON.stringify(savedState));
             localStorage.setItem('bear_wishlist_v8', JSON.stringify(wishlistData));
             updateHeaderTotals();
+            markUnsynced();
         }
 
         function updateHeaderTotals() {
             const totalSaved = getLifetimeTotal();
             const totalTarget = 204000;
             document.getElementById('headerTotalAmount').innerText = '$' + totalSaved.toLocaleString();
-            const percent = Math.min(100, Math.round((totalSaved / totalTarget) * 100));
+            const percent = Math.max(0, Math.min(100, Math.round((totalSaved / totalTarget) * 100)));
             document.getElementById('headerTotalPercent').innerText = percent + '%';
         }
 
@@ -848,7 +913,7 @@ function getLifetimeTotal() {
             }
             currentAmount += fundAdjustment(fund.id);
             const target = fund.target;
-            const percentage = Math.min(100, Math.round((currentAmount / target) * 100));
+            const percentage = Math.max(0, Math.min(100, Math.round((currentAmount / target) * 100)));
             const remaining = Math.max(0, target - currentAmount);
             return { currentAmount, target, percentage, remaining };
         }
@@ -860,6 +925,7 @@ function getLifetimeTotal() {
             if (currentVal && currentVal > 0) {
                 const confirmed = await showCustomModal('取消存款確認', `第 ${monthIndex} 個月目前已存入 $${currentVal.toLocaleString()}。請問是否要取消此筆存款紀錄？`, 'none');
                 if (confirmed) {
+                    if(getFundBalance(fundsData.find(f=>f.id===fundId))-Number(currentVal)<0){showToast('取消後餘額會變負數，請先核對提領紀錄','error');return;}
                     delete fundState[monthIndex];
                     transactions=transactions.filter(t=>!(t.fundId===fundId && t.source==='month' && t.month===monthIndex));persistTransactions();
                     savedState[fundId] = fundState;
@@ -885,6 +951,7 @@ function getLifetimeTotal() {
 
             const val = await showCustomModal('手動輸入存入金額', `請輸入第 ${monthIndex} 個月實際存入 ${fund.bank} 的金額 ($)：`, 'single', currentVal);
             if (val !== false && !isNaN(val) && val > 0) {
+                if(getFundBalance(fund)-(Number(fundState[monthIndex])||0)+Number(val)<0){showToast('修改後餘額會變負數，請先核對提領紀錄','error');return;}
                 fundState[monthIndex] = val;
                 const existingTx=transactions.find(t=>t.fundId===fundId && t.source==='month' && t.month===monthIndex);
                 if(existingTx) existingTx.amount=val; else transactions.push({id:makeId(),fundId,type:'deposit',source:'month',month:monthIndex,amount:val,date:localDate(),note:`第 ${monthIndex} 個月手動存款`});persistTransactions();
@@ -1234,7 +1301,7 @@ const fundId = 'fund8';
                 });
 
                 totalSaved = getLifetimeTotal();
-                const totalPercentage = Math.min(100, Math.round((totalSaved / totalTarget) * 100));
+                const totalPercentage = Math.max(0, Math.min(100, Math.round((totalSaved / totalTarget) * 100)));
 
                 container.innerHTML = `
                     <div class="bg-[#fffaf0] border border-[#e2d5c3] rounded-3xl p-5 sm:p-8 card-shadow relative overflow-hidden">
@@ -1347,6 +1414,9 @@ const fundId = 'fund8';
             renderTabs();
             renderApp();
             updateHeaderTotals();
+            const last=localStorage.getItem('little_bear_last_cloud_save');
+            if(localStorage.getItem('little_bear_unsynced')==='1') setCloudStatus('已存於此裝置 · 尚未確認雲端同步');
+            else if(last) setCloudStatus('上次雲端備份：'+new Date(last).toLocaleString('zh-TW')+'（尚未登入 Google）');
         };
     </script>
 </body>
